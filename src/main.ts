@@ -1,3 +1,6 @@
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import Database from 'better-sqlite3';
 import pino from 'pino';
 import { loadConfig, loadDotEnv, requireDiscord, type Config } from './config.js';
 import { AgentClient } from './agent/agent.js';
@@ -13,6 +16,7 @@ import { checkHealth, formatHealth } from './health.js';
 import { writeReport } from './report.js';
 import { CycleScheduler } from './scheduler.js';
 import { Store } from './state/db.js';
+import { createMigrator, migrate } from './state/migrator.js';
 import { TmdbClient } from './tmdb/client.js';
 
 // Before anything reads process.env. A real environment variable always
@@ -97,7 +101,7 @@ function cycleDeps(store: Store) {
 
 /** One cycle, printed to the console. No Discord involved. */
 async function judge(): Promise<void> {
-  const store = new Store(config.dbPath);
+  const store = await Store.open(config.dbPath, logger);
   try {
     const report = await runCycle(cycleDeps(store));
     printReport(report, store);
@@ -116,7 +120,7 @@ async function judge(): Promise<void> {
  */
 async function cycleOnce(): Promise<void> {
   const discordConfig = requireDiscord(config);
-  const store = new Store(config.dbPath);
+  const store = await Store.open(config.dbPath, logger);
   const gateway = new DiscordJsGateway(discordConfig);
   const service = new SuggestionService({
     store,
@@ -143,7 +147,7 @@ async function cycleOnce(): Promise<void> {
 /** The real thing: Discord bot up, one cycle now, then serve reactions. */
 async function bot(): Promise<void> {
   const discordConfig = requireDiscord(config);
-  const store = new Store(config.dbPath);
+  const store = await Store.open(config.dbPath, logger);
   const gateway = new DiscordJsGateway(discordConfig);
   const service = new SuggestionService({
     store,
@@ -198,8 +202,8 @@ async function bot(): Promise<void> {
 }
 
 /** A standalone HTML view of the decision log, for actually reading it. */
-function reportHtml(): void {
-  const store = new Store(config.dbPath);
+async function reportHtml(): Promise<void> {
+  const store = await Store.open(config.dbPath, logger);
   try {
     const path = process.argv[3] ?? 'suggestarr-decisions.html';
     writeReport(store, path);
@@ -211,7 +215,7 @@ function reportHtml(): void {
 
 /** Container HEALTHCHECK: exits non-zero when anything is wrong. */
 async function health(): Promise<void> {
-  const store = new Store(config.dbPath);
+  const store = await Store.open(config.dbPath, logger);
   try {
     const { radarr } = clients(config);
     const report = await checkHealth({ store, radarr });
@@ -223,8 +227,8 @@ async function health(): Promise<void> {
 }
 
 /** `report:decisions` — the prompt-refinement evidence base (§2.4). */
-function reportDecisions(): void {
-  const store = new Store(config.dbPath);
+async function reportDecisions(): Promise<void> {
+  const store = await Store.open(config.dbPath, logger);
   try {
     console.log('\nPrompt versions (mismatch rate = how often you overruled the agent):');
     for (const s of store.promptVersionStats()) {
@@ -256,6 +260,55 @@ function reportDecisions(): void {
   }
 }
 
+/**
+ * Migrations run automatically on every open, so these are for looking
+ * at the ledger and for backing one out by hand — not part of the normal
+ * startup path.
+ */
+function openForMigration(): Database.Database {
+  mkdirSync(dirname(config.dbPath), { recursive: true });
+  const db = new Database(config.dbPath);
+  db.pragma('foreign_keys = ON');
+  return db;
+}
+
+async function migrateUp(): Promise<void> {
+  const db = openForMigration();
+  try {
+    const applied = await migrate(db, logger);
+    console.log(applied.length ? `Applied: ${applied.join(', ')}` : 'Already up to date.');
+  } finally {
+    db.close();
+  }
+}
+
+async function migrateStatus(): Promise<void> {
+  const db = openForMigration();
+  try {
+    const migrator = createMigrator(db, logger);
+    const executed = (await migrator.executed()).map((m) => m.name);
+    const pending = (await migrator.pending()).map((m) => m.name);
+    console.log(`Database: ${config.dbPath}`);
+    console.log(`\nApplied — ${executed.length}:`);
+    for (const name of executed) console.log(`  ✓ ${name}`);
+    console.log(`\nPending — ${pending.length}:`);
+    for (const name of pending) console.log(`  · ${name}`);
+  } finally {
+    db.close();
+  }
+}
+
+/** Revert the newest migration. Destructive: it drops what that step added. */
+async function migrateDown(): Promise<void> {
+  const db = openForMigration();
+  try {
+    const reverted = await createMigrator(db, logger).down();
+    console.log(reverted.length ? `Reverted: ${reverted[0]?.name}` : 'Nothing to revert.');
+  } finally {
+    db.close();
+  }
+}
+
 const [cmd] = process.argv.slice(2);
 
 switch (cmd ?? 'library') {
@@ -275,15 +328,25 @@ switch (cmd ?? 'library') {
     await health();
     break;
   case 'report:decisions':
-    reportDecisions();
+    await reportDecisions();
     break;
   case 'report:html':
-    reportHtml();
+    await reportHtml();
+    break;
+  case 'migrate':
+    await migrateUp();
+    break;
+  case 'migrate:status':
+    await migrateStatus();
+    break;
+  case 'migrate:down':
+    await migrateDown();
     break;
   default:
     console.error(
       `Unknown command: ${cmd}\n` +
-        'Usage: suggestarr [library | judge | cycle | bot | health | report:decisions | report:html]',
+        'Usage: suggestarr [library | judge | cycle | bot | health | report:decisions | ' +
+          'report:html | migrate | migrate:status | migrate:down]',
     );
     process.exitCode = 1;
 }

@@ -102,9 +102,9 @@ function heuristicAgent(): AgentClient {
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterAll(() => server.close());
 
-beforeEach(() => {
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'suggestarr-e2e-'));
-  store = new Store(join(dir, 'state.db'));
+  store = await Store.open(join(dir, 'state.db'));
   gateway = new FakeGateway();
   service = new SuggestionService({
     store,
@@ -559,7 +559,7 @@ describe('state survives a restart', () => {
     const before = store.listDecisions().length;
     store.close();
 
-    store = new Store(path);
+    store = await Store.open(path);
     expect(store.listDecisions()).toHaveLength(before);
     expect(store.pendingSuggestions()).toHaveLength(3);
   });

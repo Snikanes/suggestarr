@@ -9,8 +9,8 @@ import { candidatesFixture, judgeResultFixture } from '../fixtures/agent.js';
 let store: Store;
 let dir: string;
 
-beforeEach(() => {
-  store = new Store(':memory:');
+beforeEach(async () => {
+  store = await Store.open(':memory:');
   dir = mkdtempSync(join(tmpdir(), 'suggestarr-report-'));
 });
 afterEach(() => {

@@ -25,7 +25,12 @@ export default defineConfig({
       // discordjs.ts is the one adapter needing a real gateway connection
       // (its only pure part, toDiscordEmbed, is tested); gateway.ts is
       // interfaces only and emits no runtime code.
-      exclude: ['src/discord/discordjs.ts', 'src/discord/gateway.ts'],
+      // src/state/migrations/types.ts is likewise types only.
+      exclude: [
+        'src/discord/discordjs.ts',
+        'src/discord/gateway.ts',
+        'src/state/migrations/types.ts',
+      ],
       thresholds: {
         lines: 100,
         functions: 100,

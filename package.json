@@ -12,6 +12,9 @@
     "cycle": "tsx src/main.ts cycle",
     "bot": "tsx src/main.ts bot",
     "health": "tsx src/main.ts health",
+    "migrate": "tsx src/main.ts migrate",
+    "migrate:status": "tsx src/main.ts migrate:status",
+    "migrate:down": "tsx src/main.ts migrate:down",
     "report:decisions": "tsx src/main.ts report:decisions",
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
@@ -25,6 +28,7 @@
     "croner": "^10.0.1",
     "discord.js": "^14.27.0",
     "pino": "^9.5.0",
+    "umzug": "^3.8.3",
     "zod": "^3.24.0"
   },
   "devDependencies": {

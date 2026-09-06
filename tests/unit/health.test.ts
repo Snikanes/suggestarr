@@ -25,8 +25,8 @@ const deps = () => ({
 });
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
-beforeEach(() => {
-  store = new Store(':memory:');
+beforeEach(async () => {
+  store = await Store.open(':memory:');
 });
 afterEach(() => {
   server.resetHandlers();
@@ -66,7 +66,7 @@ describe('checkHealth', () => {
     expect(report.ok).toBe(false);
     expect(report.checks[0]).toMatchObject({ name: 'database', ok: false });
     // reopen so afterEach can close it again
-    store = new Store(':memory:');
+    store = await Store.open(':memory:');
   });
 
   it('renders a report a HEALTHCHECK log can be read from', async () => {

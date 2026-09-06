@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
+import { migrate, type MigrationLogger } from './migrator.js';
 import type { Candidate } from '../tmdb/types.js';
 import type { JudgeResult, Verdict } from '../agent/types.js';
 
@@ -53,63 +54,6 @@ export interface Mismatch {
   type: 'dropped-but-wanted' | 'kept-but-rejected';
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS runs (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  started_at      TEXT    NOT NULL,
-  provider        TEXT    NOT NULL,
-  model           TEXT    NOT NULL,
-  prompt_version  TEXT    NOT NULL,
-  taste_hash      TEXT    NOT NULL,
-  candidate_count INTEGER NOT NULL,
-  kept_count      INTEGER NOT NULL,
-  attempts        INTEGER NOT NULL,
-  input_tokens    INTEGER,
-  output_tokens   INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS agent_decisions (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id         INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  remote_id      INTEGER NOT NULL,
-  title          TEXT    NOT NULL,
-  year           INTEGER,
-  origin         TEXT    NOT NULL,
-  rating         REAL,
-  votes          INTEGER,
-  poster_url     TEXT,
-  overview       TEXT,
-  verdict        TEXT    NOT NULL CHECK (verdict IN ('keep','drop')),
-  reason         TEXT    NOT NULL,
-  provider       TEXT    NOT NULL,
-  model          TEXT    NOT NULL,
-  prompt_version TEXT    NOT NULL,
-  taste_hash     TEXT    NOT NULL,
-  created_at     TEXT    NOT NULL,
-  outcome        TEXT    CHECK (outcome IN ('approved','rejected','force-added','expired')),
-  outcome_at     TEXT
-);
-
-CREATE TABLE IF NOT EXISTS suggestions (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  decision_id INTEGER NOT NULL REFERENCES agent_decisions(id) ON DELETE CASCADE,
-  remote_id   INTEGER NOT NULL,
-  title       TEXT    NOT NULL,
-  year        INTEGER,
-  channel_id  TEXT    NOT NULL,
-  message_id  TEXT    NOT NULL UNIQUE,
-  posted_at   TEXT    NOT NULL,
-  state       TEXT    NOT NULL CHECK (state IN ('pending','approved','rejected','failed','expired')),
-  resolved_at TEXT,
-  error       TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_decisions_title   ON agent_decisions(remote_id);
-CREATE INDEX IF NOT EXISTS idx_decisions_outcome ON agent_decisions(outcome);
-CREATE INDEX IF NOT EXISTS idx_decisions_run     ON agent_decisions(run_id);
-CREATE INDEX IF NOT EXISTS idx_suggestions_state ON suggestions(state);
-CREATE INDEX IF NOT EXISTS idx_suggestions_title ON suggestions(remote_id);
-`;
 
 /** Lifecycle of one posted Discord suggestion. */
 export type SuggestionState = 'pending' | 'approved' | 'rejected' | 'failed' | 'expired';
@@ -183,12 +127,25 @@ interface RawDecision {
 export class Store {
   private readonly db: Database.Database;
 
-  constructor(path: string) {
+  private constructor(db: Database.Database) {
+    this.db = db;
+  }
+
+  /**
+   * Open a database and bring it up to the newest migration.
+   *
+   * Async because migrations are: the schema is no longer applied
+   * blindly on every open, it is a versioned ledger Umzug walks. Every
+   * query below stays synchronous — only getting the file open costs an
+   * await.
+   */
+  static async open(path: string, logger?: MigrationLogger): Promise<Store> {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.db.exec(SCHEMA);
+    const db = new Database(path);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    await migrate(db, logger);
+    return new Store(db);
   }
 
   /**

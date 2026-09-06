@@ -24,7 +24,7 @@ let adder: StubAdder;
 let service: SuggestionService;
 
 beforeEach(async () => {
-  store = new Store(':memory:');
+  store = await Store.open(':memory:');
   gateway = new FakeGateway();
   adder = new StubAdder();
   service = new SuggestionService({ store, gateway, adder });
@@ -56,7 +56,7 @@ describe('postVerdicts', () => {
 
   it('skips verdicts whose candidate or decision is missing', async () => {
     const fresh = new FakeGateway();
-    const svc = new SuggestionService({ store: new Store(':memory:'), gateway: fresh, adder });
+    const svc = new SuggestionService({ store: await Store.open(':memory:'), gateway: fresh, adder });
     await svc.postVerdicts(judgeResultFixture, candidatesFixture);
     expect(fresh.posted).toHaveLength(0);
   });

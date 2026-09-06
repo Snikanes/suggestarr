@@ -5,8 +5,8 @@ import { candidatesFixture, judgeResultFixture, libraryFixture } from '../fixtur
 
 let store: Store;
 
-beforeEach(() => {
-  store = new Store(':memory:');
+beforeEach(async () => {
+  store = await Store.open(':memory:');
   store.recordJudgement(judgeResultFixture, candidatesFixture);
 });
 

@@ -5,8 +5,8 @@ import { candidatesFixture, judgeResultFixture, matrixCandidate } from '../fixtu
 
 let store: Store;
 
-beforeEach(() => {
-  store = new Store(':memory:');
+beforeEach(async () => {
+  store = await Store.open(':memory:');
 });
 afterEach(() => {
   store.close();

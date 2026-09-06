@@ -52,6 +52,9 @@ watch the whole pipeline work before spending a token.
 | `npm run bot` | Start the Discord bot and the cycle schedule. This is the real thing |
 | `npm run report:decisions` | Prompt-version scoreboard, agent/human mismatches, what is pending |
 | `npm run report:html [path]` | The same evidence as a standalone HTML page you'd actually read |
+| `npm run migrate:status` | What the database has applied, and what is pending |
+| `npm run migrate` | Apply pending migrations by hand (every command does this on open anyway) |
+| `npm run migrate:down` | Revert the newest migration. Destructive — it drops what that step added |
 | `npm test` / `npm run test:coverage` | The full suite, every integration mocked |
 
 ## How a cycle works
@@ -149,6 +152,42 @@ knowing:
 | `DISCOVERY_MIN_RATING` / `DISCOVERY_MIN_VOTES` | `6` / `100` | Candidate quality floor |
 | `RADARR_ROOT_FOLDER` / `RADARR_QUALITY_PROFILE` | first available | Where approvals land |
 | `SUGGESTARR_DB_PATH` | `./data/suggestarr.db` | SQLite state |
+
+## The database
+
+State lives in one SQLite file (`SUGGESTARR_DB_PATH`, `/config/suggestarr.db` in the container), and
+its schema is versioned with [Umzug](https://github.com/sequelize/umzug). Migrations run
+automatically whenever a command opens the store, so an upgrade needs no separate step: pull the new
+image, start it, and the schema catches up before anything reads a row.
+
+Migrations are TypeScript modules under `src/state/migrations/`, listed explicitly in that
+directory's `index.ts` rather than globbed off disk — a glob would have to match `.ts` under `tsx`
+and `.js` under the compiled `dist/` the container actually runs, and a glob that silently matches
+nothing looks exactly like a database that is already up to date.
+
+Each step is a plain synchronous function of a `Database`, run inside a real transaction, so a
+migration that fails half way leaves the schema exactly as it was. The ledger of what has been
+applied lives in a `migrations` table in the same file as the data it describes, so a database and
+its history can never be separated by a stray volume mount.
+
+**Databases from before migrations existed are adopted, not rebuilt.** The old code applied the
+whole schema with `CREATE TABLE IF NOT EXISTS` on every open, so an existing `suggestarr.db` has the
+tables but no ledger. `001-baseline` is that same idempotent schema, so applying it to one of those
+is a no-op that simply records the file as being at version one — every row survives.
+
+To add a migration, drop a new numbered module next to the others and add it to `index.ts`:
+
+```ts
+// src/state/migrations/002-something.ts
+import type { MigrationStep } from './types.js';
+
+export const up: MigrationStep = (db) => db.exec(`ALTER TABLE suggestions ADD COLUMN note TEXT`);
+export const down: MigrationStep = (db) => db.exec(`ALTER TABLE suggestions DROP COLUMN note`);
+```
+
+Umzug writes the ledger row after the step commits, which leaves a hair-thin window where a process
+killed between the two would re-run the step on restart — so write every migration to be safe to
+apply twice.
 
 ## Deployment
 
