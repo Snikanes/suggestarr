@@ -3,7 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr.io/<owner>/<repo>, lowercased by the metadata action
+  IMAGE_NAME: ${{ github.repository }}
+  # Add linux/arm64 here if the host running Suggestarr is arm (a Pi, an
+  # Apple Silicon box). It roughly triples build time: better-sqlite3 is a
+  # native module and the arm build runs under QEMU emulation.
+  PLATFORMS: linux/amd64
 
 jobs:
   test:
@@ -28,23 +38,72 @@ jobs:
         env:
           LLM_PROVIDER: mock
 
-  # The image is how this actually ships, so a broken Dockerfile or a
-  # native better-sqlite3 build should fail here, not on the host.
   image:
+    # Nothing reaches the registry unless the suite is green.
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - uses: actions/checkout@v4
+
+      # Only needed once PLATFORMS includes a non-native arch; cheap to
+      # always set up so flipping arm64 on is genuinely a one-line change.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
-      - name: Build the container image
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Built once, loaded locally, and smoke-tested before anything is
+      # pushed — a Dockerfile that builds but cannot start never ships.
+      - name: Build for verification
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: false
           load: true
-          tags: suggestarr:ci
+          tags: suggestarr:verify
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: The entrypoint runs and the CLI answers
+
+      - name: The image starts and the CLI answers
         run: |
-          docker run --rm --entrypoint node suggestarr:ci dist/main.js nonsense 2>&1 \
+          docker run --rm --entrypoint node suggestarr:verify dist/main.js nonsense 2>&1 \
             | grep -q 'Usage: suggestarr'
+
+      # Pull requests stop here: they get the build and the smoke test, but
+      # no credentials and no push. A fork's token cannot write packages.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Same layers as the verification build, so this is a re-tag in
+          # practice rather than a second compile.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

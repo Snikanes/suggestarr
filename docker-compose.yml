@@ -1,7 +1,10 @@
 services:
   suggestarr:
-    build: .
-    image: suggestarr:latest
+    # Published by CI to GHCR on every green build of main. Set GHCR_OWNER
+    # to your GitHub user/org, e.g. `GHCR_OWNER=snikanes docker compose up -d`
+    # or put it in .env. To build locally instead, uncomment `build: .`.
+    image: ghcr.io/${GHCR_OWNER:-set-GHCR_OWNER}/suggestarr:${SUGGESTARR_TAG:-latest}
+    # build: .
     container_name: suggestarr
     # Deliberately NOT behind gluetun: suggestarr torrents nothing. It needs
     # Discord, TMDB and the LLM provider directly, and reaches Radarr over

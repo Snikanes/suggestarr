@@ -154,11 +154,23 @@ knowing:
 
 Suggestarr ships as a container that behaves like the other *arr services on the host: `PUID`/`PGID`/`TZ`/`UMASK_SET`, a `/config` volume, `restart: unless-stopped`, and a healthcheck.
 
+CI publishes the image to GHCR on every green build of `main`, so the host just pulls:
+
 ```bash
-docker compose build suggestarr
+echo "GHCR_OWNER=<your github user>" >> .env
+docker compose pull suggestarr
 docker compose up -d suggestarr
 docker logs -f suggestarr
 ```
+
+Tags published: `latest` (main), `main`, `sha-<short>` for pinning, and `v1.2.3` / `v1.2` when you
+push a `v*` git tag. GHCR paths are lowercase, so use the lowercase form of your username in
+`GHCR_OWNER` even if GitHub displays it capitalised. Pin `SUGGESTARR_TAG=sha-abc1234` in `.env` if you would rather not track
+`latest`. The package is private by default — make it public in the repo's package settings, or
+`docker login ghcr.io` on the host with a PAT that has `read:packages`.
+
+To build locally instead, uncomment `build: .` in the compose file and run `docker compose build
+suggestarr`.
 
 `docker-compose.yml` defines the suggestarr service only — the rest of the *arr stack (Radarr,
 gluetun, qBittorrent and friends) is managed separately on the host. Two things about it are
@@ -173,6 +185,11 @@ deliberate:
 Secrets come from `.env` via `env_file`, never inline in the compose file.
 
 ## Tests
+
+CI runs the same suite on every push and pull request, and **nothing reaches GHCR unless it is
+green**: the image job declares `needs: test`, so a failing test blocks the publish. Pull requests
+get the image build and a smoke test that the container actually starts, but no credentials and no
+push.
 
 `npm test` runs unit tests for every adapter and mapping plus a fully mocked end-to-end pipeline:
 TMDB, Radarr and the LLM are stubbed HTTP, Discord is an in-memory fake, and the database is a real
