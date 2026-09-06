@@ -6,9 +6,6 @@ on:
     tags: ['v*']
   pull_request:
 
-# Every action below is pinned to a major that runs on Node 24 natively.
-# Node 20 actions still work but the runner warns; these need Actions
-# Runner v2.327.1+, which GitHub-hosted runners have.
 env:
   REGISTRY: ghcr.io
   # ghcr.io/<owner>/<repo>, lowercased by the metadata action
@@ -82,10 +79,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Runs through the real ENTRYPOINT — tini, the PUID/PGID remap and
+      # su-exec — because that chain only ever executes in a container and
+      # is the part a local `npm run` can never prove. The two keys are
+      # dummies: config is validated at startup, so the CLI cannot print
+      # anything at all without them.
       - name: The image starts and the CLI answers
         run: |
-          docker run --rm --entrypoint node suggestarr:verify dist/main.js nonsense 2>&1 \
-            | grep -q 'Usage: suggestarr'
+          output=$(docker run --rm \
+            -e RADARR_API_KEY=ci-dummy -e TMDB_API_KEY=ci-dummy \
+            suggestarr:verify node dist/main.js nonsense 2>&1 || true)
+          echo "$output"
+          echo "$output" | grep -q 'Usage: suggestarr'
 
       # Pull requests stop here: they get the build and the smoke test, but
       # no credentials and no push. A fork's token cannot write packages.
