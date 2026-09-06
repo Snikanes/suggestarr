@@ -301,3 +301,52 @@ describe('Store.pruneCandidatePayloads', () => {
     expect(store.pruneCandidatePayloads(new Date('2026-09-06T00:00:00.000Z'))).toBe(0);
   });
 });
+
+describe('Store.markSuggestion', () => {
+  const suggestion = (): number => {
+    seed();
+    return store.recordSuggestion(
+      {
+        decisionId: store.latestDecision(603)!.id,
+        remoteId: 603,
+        title: 'The Matrix',
+        year: 1999,
+        channelId: 'c-1',
+        messageId: 'm-1',
+      },
+      AT,
+    );
+  };
+
+  it('keeps the quality profile an approval actually landed at', () => {
+    const id = suggestion();
+    expect(store.suggestionByMessage('m-1')?.qualityProfileId).toBeNull();
+
+    store.markSuggestion(id, 'approved', { qualityProfile: { id: 6, name: 'Ultra-HD' } }, AT);
+
+    const row = store.suggestionByMessage('m-1')!;
+    expect(row).toMatchObject({
+      state: 'approved',
+      qualityProfileId: 6,
+      qualityProfileName: 'Ultra-HD',
+      error: null,
+    });
+  });
+
+  it('keeps the error on a failed add, and leaves the profile unclaimed', () => {
+    const id = suggestion();
+    store.markSuggestion(id, 'failed', { error: 'Radarr said no' }, AT);
+
+    expect(store.suggestionByMessage('m-1')).toMatchObject({
+      state: 'failed',
+      error: 'Radarr said no',
+      qualityProfileId: null,
+      qualityProfileName: null,
+    });
+  });
+
+  it('reports whether it matched a row at all', () => {
+    expect(store.markSuggestion(999, 'rejected')).toBe(false);
+    expect(store.markSuggestion(suggestion(), 'rejected')).toBe(true);
+  });
+});

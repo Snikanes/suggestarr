@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ANSWER_FIELD_NAME,
   APPROVE_EMOJI,
   COLORS,
   REJECT_EMOJI,
@@ -36,8 +37,11 @@ describe('buildSuggestionEmbed', () => {
       { name: 'TMDB', value: '★ 8.2 (16000 votes)', inline: true },
       { name: 'Source', value: 'trending', inline: true },
       {
-        name: 'React to decide',
-        value: `${APPROVE_EMOJI} add to Radarr · ${REJECT_EMOJI} never suggest again`,
+        name: ANSWER_FIELD_NAME,
+        value:
+          `${APPROVE_EMOJI} add at the default quality profile · ` +
+          `${REJECT_EMOJI} never suggest again · ` +
+          'or pick a quality profile from the menu below',
         inline: false,
       },
     ]);
@@ -70,7 +74,7 @@ describe('buildResolvedEmbed', () => {
     const approved = buildResolvedEmbed(base, 'approved', 'Monitored in Radarr.');
 
     expect(approved.color).toBe(COLORS.approved);
-    expect(approved.fields.some((f) => f.name === 'React to decide')).toBe(false);
+    expect(approved.fields.some((f) => f.name === ANSWER_FIELD_NAME)).toBe(false);
     expect(approved.fields.at(-1)).toEqual({
       name: `${APPROVE_EMOJI} Added`,
       value: 'Monitored in Radarr.',
@@ -140,6 +144,8 @@ describe('formatPendingList', () => {
     state: 'pending',
     resolvedAt: null,
     error: null,
+    qualityProfileId: null,
+    qualityProfileName: null,
     ...over,
   });
 

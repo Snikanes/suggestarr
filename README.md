@@ -3,7 +3,8 @@
 Suggestarr watches your Radarr library, discovers new movies on TMDB, asks an LLM to judge which
 ones are actually worth your disk space, and posts the survivors to Discord. React ✅ and the movie
 is added to Radarr as monitored — your existing *arr stack takes it from there. React ❌ and it is
-never suggested again.
+never suggested again. Every suggestion also carries a dropdown of Radarr's quality profiles, so a
+film you want in Remux-2160p does not have to land wherever the default sends it.
 
 **Movies only.** There is no Sonarr integration and no series support anywhere in the model.
 
@@ -76,7 +77,10 @@ watch the whole pipeline work before spending a token.
 5. **Post**: kept titles become Discord embeds with the poster, TMDB score and the agent's
    reasoning. Dropped titles stay in the log, reachable via `/decisions`.
 6. **Answer**: ✅ resolves the movie through Radarr's own lookup and adds it monitored with
-   search-on-add; ❌ records a permanent no. Either way the decision row gets its outcome.
+   search-on-add, at `RADARR_QUALITY_PROFILE`; picking from the **quality profile dropdown** does the
+   same at that profile instead; ❌ records a permanent no. Either way the decision row gets its
+   outcome, and an approval records which profile it actually landed at. The dropdown disappears once
+   the suggestion is answered.
 7. **Unanswered**: after `SUGGESTARR_EXPIRE_AFTER_DAYS` (default 2) a suggestion nobody reacted to
    expires. That is **not** a no — the embed greys out, the title goes back in the pool, and a later
    cycle can suggest it again. Only a real ✅/❌ retires a title for good.
@@ -85,6 +89,12 @@ Answers given while the bot was offline are not lost: at startup it reads the re
 sitting on every pending suggestion and applies them (a ❌ wins if both are present). Discord never
 replays reactions to a gateway that was disconnected, so without this a ✅ pressed overnight would
 sit unnoticed.
+
+**This is why the reactions are still there.** A dropdown pick is an *interaction*, and Discord
+neither replays nor stores one for a bot that was down — it just fails in front of the user. The
+reactions are the answer path that survives downtime and `npm run cycle`; the dropdown is the one
+that lets you choose where the film lands. If Radarr cannot be reached when a cycle posts, the
+suggestion goes out without a dropdown rather than not at all.
 
 ### Running a cycle on demand
 
@@ -111,7 +121,7 @@ them.
 
 | Command | Purpose |
 |---|---|
-| `/add <tmdb_id>` | Approve a pending suggestion, or force-add a movie the agent dropped |
+| `/add <tmdb_id> [quality_profile]` | Approve a pending suggestion, or force-add a movie the agent dropped. The profile list is read from Radarr when the bot starts; omit it for the default |
 | `/skip <tmdb_id>` | Record a permanent no |
 | `/decisions [tmdb_id]` | Audit the verdicts, including everything the agent dropped |
 | `/status` | What is pending, and the lifetime approve/reject/force-add tally |
@@ -150,7 +160,7 @@ knowing:
 | `DISCOVERY_EXEMPT_UPCOMING` | `true` | Waive the rating/vote floor for unreleased films |
 | `SUGGESTARR_TASTE_NOTES` | — | Free-text preferences, always sent to the agent |
 | `DISCOVERY_MIN_RATING` / `DISCOVERY_MIN_VOTES` | `6` / `100` | Candidate quality floor |
-| `RADARR_ROOT_FOLDER` / `RADARR_QUALITY_PROFILE` | first available | Where approvals land |
+| `RADARR_ROOT_FOLDER` / `RADARR_QUALITY_PROFILE` | first available | Where approvals land. The profile is only the default — the Discord dropdown overrides it per title |
 | `SUGGESTARR_DB_PATH` | `./data/suggestarr.db` | SQLite state |
 
 ## The database
@@ -178,7 +188,7 @@ is a no-op that simply records the file as being at version one — every row su
 To add a migration, drop a new numbered module next to the others and add it to `index.ts`:
 
 ```ts
-// src/state/migrations/002-something.ts
+// src/state/migrations/003-something.ts
 import type { MigrationStep } from './types.js';
 
 export const up: MigrationStep = (db) => db.exec(`ALTER TABLE suggestions ADD COLUMN note TEXT`);

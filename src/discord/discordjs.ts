@@ -1,20 +1,25 @@
 import {
+  ActionRowBuilder,
   Client,
   Events,
   GatewayIntentBits,
   Partials,
   REST,
   Routes,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   type Message,
   type SendableChannels,
 } from 'discord.js';
 import type { DiscordConfig } from '../config.js';
-import { COMMANDS } from './commands.js';
+import { buildCommands, type CommandJson } from './commands.js';
 import type { SuggestionEmbed } from './embeds.js';
 import type {
   CommandEvent,
   CommandReply,
+  ComponentEvent,
   DiscordGateway,
+  MessageComponents,
   PostedMessage,
   ReactionEvent,
   ReactionSnapshot,
@@ -34,9 +39,13 @@ import type {
 export class DiscordJsGateway implements DiscordGateway {
   private readonly client: Client;
   private reactionHandler?: (event: ReactionEvent) => Promise<void>;
+  private componentHandler?: (event: ComponentEvent) => Promise<CommandReply>;
   private commandHandler?: (event: CommandEvent) => Promise<CommandReply>;
 
-  constructor(private readonly cfg: DiscordConfig) {
+  constructor(
+    private readonly cfg: DiscordConfig,
+    private readonly commands: CommandJson[] = buildCommands(),
+  ) {
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -61,6 +70,22 @@ export class DiscordJsGateway implements DiscordGateway {
     });
 
     this.client.on(Events.InteractionCreate, async (interaction) => {
+      if (interaction.isStringSelectMenu()) {
+        if (!this.componentHandler) return;
+        // Radarr's lookup + add can outlast Discord's three-second
+        // acknowledgement window, which the slash commands never risk.
+        await interaction.deferReply({ ephemeral: true });
+        const reply = await this.componentHandler({
+          customId: interaction.customId,
+          values: interaction.values,
+          messageId: interaction.message.id,
+          channelId: interaction.channelId,
+          userId: interaction.user.id,
+          userIsBot: interaction.user.bot,
+        });
+        await interaction.editReply({ content: reply.text });
+        return;
+      }
       if (!interaction.isChatInputCommand() || !this.commandHandler) return;
       const options: Record<string, string | number | undefined> = {};
       for (const option of interaction.options.data) {
@@ -82,16 +107,28 @@ export class DiscordJsGateway implements DiscordGateway {
     await this.client.destroy();
   }
 
-  async post(embed: SuggestionEmbed, reactions: string[]): Promise<PostedMessage> {
+  async post(
+    embed: SuggestionEmbed,
+    reactions: string[],
+    components?: MessageComponents,
+  ): Promise<PostedMessage> {
     const channel = await this.textChannel();
-    const message = await channel.send({ embeds: [toDiscordEmbed(embed)] });
+    const message = await channel.send({
+      embeds: [toDiscordEmbed(embed)],
+      components: toActionRows(components),
+    });
     for (const emoji of reactions) await message.react(emoji);
     return { channelId: message.channelId, messageId: message.id };
   }
 
-  async edit(target: PostedMessage, embed: SuggestionEmbed): Promise<void> {
+  async edit(
+    target: PostedMessage,
+    embed: SuggestionEmbed,
+    components?: MessageComponents,
+  ): Promise<void> {
     const message = await this.fetchMessage(target);
-    await message.edit({ embeds: [toDiscordEmbed(embed)] });
+    // An empty array is what strips a resolved message's dropdown.
+    await message.edit({ embeds: [toDiscordEmbed(embed)], components: toActionRows(components) });
   }
 
   async notice(text: string): Promise<void> {
@@ -118,6 +155,10 @@ export class DiscordJsGateway implements DiscordGateway {
     this.reactionHandler = handler;
   }
 
+  onComponent(handler: (event: ComponentEvent) => Promise<CommandReply>): void {
+    this.componentHandler = handler;
+  }
+
   onCommand(handler: (event: CommandEvent) => Promise<CommandReply>): void {
     this.commandHandler = handler;
   }
@@ -131,7 +172,7 @@ export class DiscordJsGateway implements DiscordGateway {
     const route = this.cfg.guildId
       ? Routes.applicationGuildCommands(this.cfg.clientId, this.cfg.guildId)
       : Routes.applicationCommands(this.cfg.clientId);
-    await rest.put(route, { body: COMMANDS });
+    await rest.put(route, { body: this.commands });
   }
 
   private async textChannel(): Promise<SendableChannels> {
@@ -151,6 +192,24 @@ export class DiscordJsGateway implements DiscordGateway {
     }
     return channel.messages.fetch(target.messageId);
   }
+}
+
+/** Internal component shape -> a discord.js action row, or none at all. */
+export function toActionRows(
+  components?: MessageComponents,
+): ActionRowBuilder<StringSelectMenuBuilder>[] {
+  if (!components) return [];
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(components.customId)
+    .setPlaceholder(components.placeholder)
+    .addOptions(
+      components.options.map((o) => {
+        const option = new StringSelectMenuOptionBuilder().setLabel(o.label).setValue(o.value);
+        if (o.description) option.setDescription(o.description);
+        return option;
+      }),
+    );
+  return [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)];
 }
 
 /** Internal embed shape -> discord.js embed JSON. */

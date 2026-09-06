@@ -116,6 +116,7 @@ describe('ArrAdder', () => {
       title: 'The Matrix',
       rootFolderPath: '/movies',
       qualityProfileId: 4,
+      qualityProfileName: 'HD-1080p',
     });
   });
 
@@ -148,6 +149,59 @@ describe('ArrAdder', () => {
 
     expect(folderCalls).toBe(1);
     expect(posted).toHaveLength(2);
+  });
+
+  it('adds at a profile chosen per approval, leaving the default cache alone', async () => {
+    const adder = new ArrAdder(radarr, placement);
+    const added = await adder.add(603, 'The Matrix', 1999, { qualityProfileId: 6 });
+
+    expect(added.qualityProfileId).toBe(6);
+    expect(added.qualityProfileName).toBe('Ultra-HD');
+    expect(posted[0]?.body).toMatchObject({ rootFolderPath: '/movies', qualityProfileId: 6 });
+
+    // the next approval without an override is back at the default
+    await adder.add(603, 'The Matrix', 1999);
+    expect(posted[1]?.body).toMatchObject({ qualityProfileId: 4 });
+  });
+
+  it('names a profile Radarr has since forgotten by its bare id', async () => {
+    const added = await new ArrAdder(radarr, placement).add(603, 'The Matrix', 1999, {
+      qualityProfileId: 99,
+    });
+    expect(added.qualityProfileName).toBe('profile 99');
+  });
+
+  it('lists the quality profiles once, for the Discord picker', async () => {
+    let profileCalls = 0;
+    server.use(
+      http.get(`${RADARR}/api/v3/qualityprofile`, () => {
+        profileCalls += 1;
+        return HttpResponse.json(qualityProfilesFixture);
+      }),
+    );
+    const adder = new ArrAdder(radarr, placement);
+
+    expect(await adder.qualityProfiles()).toEqual([
+      { id: 4, name: 'HD-1080p' },
+      { id: 6, name: 'Ultra-HD' },
+    ]);
+    await adder.qualityProfiles();
+    await adder.add(603, 'The Matrix', 1999);
+
+    expect(profileCalls).toBe(1);
+  });
+
+  it('names the default profile without needing a root folder', async () => {
+    server.use(http.get(`${RADARR}/api/v3/rootfolder`, () => HttpResponse.json([])));
+
+    expect(await new ArrAdder(radarr, placement).defaultQualityProfile()).toEqual({
+      id: 4,
+      name: 'HD-1080p',
+    });
+    expect(
+      await new ArrAdder(radarr, { qualityProfile: 'ultra-hd', searchOnAdd: true })
+        .defaultQualityProfile(),
+    ).toEqual({ id: 6, name: 'Ultra-HD' });
   });
 
   it('raises TitleNotFoundError when Radarr cannot resolve the title', async () => {

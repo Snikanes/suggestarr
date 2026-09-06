@@ -68,7 +68,7 @@ describe('migrate', () => {
       VALUES ('2026-09-05T10:00:00.000Z', 'mock', 'heuristic-1', 'v1', 'abc', 4, 3, 1);
     `);
 
-    expect(await migrate(db)).toEqual(['001-baseline']);
+    expect(await migrate(db)).toEqual(MIGRATIONS.map((m) => m.name));
     expect(db.prepare(`SELECT count(*) AS c FROM runs`).get()).toEqual({ c: 1 });
     expect(tables()).toEqual(expect.arrayContaining(['agent_decisions', 'suggestions']));
   });
@@ -86,11 +86,14 @@ describe('createMigrator', () => {
     expect(await migrator.pending()).toEqual([]);
   });
 
-  it('takes the newest migration back out again', async () => {
+  it('takes the newest migration back out again, one step at a time', async () => {
     await migrate(db);
-    const reverted = await createMigrator(db).down();
+    const migrator = createMigrator(db);
 
-    expect(reverted.map((m) => m.name)).toEqual(['001-baseline']);
+    expect((await migrator.down()).map((m) => m.name)).toEqual(['002-quality-profile']);
+    expect(tables()).toContain('suggestions');
+
+    expect((await migrator.down()).map((m) => m.name)).toEqual(['001-baseline']);
     expect(tables()).not.toContain('suggestions');
     expect(db.prepare(`SELECT count(*) AS c FROM migrations`).get()).toEqual({ c: 0 });
   });
@@ -166,6 +169,47 @@ describe('transactional', () => {
 
     await step.down?.(params);
     expect(tables()).not.toContain('kept');
+  });
+});
+
+describe('002-quality-profile', () => {
+  it('adds the columns to a database that predates the picker, keeping its rows', async () => {
+    // Suggestions recorded before the quality profile could be chosen.
+    await createMigrator(db).up({ to: '001-baseline' });
+    db.exec(`
+      INSERT INTO runs (started_at, provider, model, prompt_version, taste_hash,
+                        candidate_count, kept_count, attempts)
+      VALUES ('2026-09-05T10:00:00.000Z', 'mock', 'heuristic-1', 'v1', 'abc', 1, 1, 1);
+      INSERT INTO agent_decisions (run_id, remote_id, title, year, origin, verdict, reason,
+                                   provider, model, prompt_version, taste_hash, created_at)
+      VALUES (1, 603, 'The Matrix', 1999, 'trending', 'keep', 'anchor sci-fi',
+              'mock', 'heuristic-1', 'v1', 'abc', '2026-09-05T10:00:00.000Z');
+      INSERT INTO suggestions (decision_id, remote_id, title, year, channel_id, message_id,
+                               posted_at, state)
+      VALUES (1, 603, 'The Matrix', 1999, 'c-1', 'm-old', '2026-09-05T10:00:00.000Z', 'pending');
+    `);
+
+    expect(await migrate(db)).toEqual(['002-quality-profile']);
+
+    const store = await Store.open(join(dir, 'state.db'));
+    expect(store.suggestionByMessage('m-old')).toMatchObject({
+      title: 'The Matrix',
+      qualityProfileId: null,
+      qualityProfileName: null,
+    });
+    store.close();
+  });
+
+  it('takes the columns back out again', async () => {
+    await migrate(db);
+    await createMigrator(db).down();
+
+    const columns = (
+      db.prepare(`PRAGMA table_info(suggestions)`).all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(columns).not.toContain('quality_profile_id');
+    expect(columns).not.toContain('quality_profile_name');
+    expect(columns).toContain('message_id');
   });
 });
 

@@ -171,6 +171,49 @@ describe('a full daily cycle', () => {
   });
 });
 
+describe('picking a quality profile', () => {
+  it('adds at the profile chosen from the dropdown, not the default', async () => {
+    await runCycle(pipeline(heuristicAgent()));
+    const matrix = gateway.posted.find((p) => p.embed.title.startsWith('The Matrix'))!;
+
+    // Every suggestion carries Radarr's live profile list, default first
+    expect(matrix.components?.options).toEqual([
+      { label: 'HD-1080p', value: '4', description: 'default' },
+      { label: 'Ultra-HD', value: '6' },
+    ]);
+
+    const reply = await gateway.select(matrix.messageId, ['6']);
+
+    expect(reply.text).toContain('Ultra-HD');
+    expect(arrPosts).toHaveLength(1);
+    expect(arrPosts[0]?.body).toMatchObject({
+      tmdbId: 603,
+      monitored: true,
+      rootFolderPath: '/movies',
+      qualityProfileId: 6,
+    });
+
+    const suggestion = store.suggestionByMessage(matrix.messageId)!;
+    expect(suggestion).toMatchObject({
+      state: 'approved',
+      qualityProfileId: 6,
+      qualityProfileName: 'Ultra-HD',
+    });
+    expect(store.latestDecision(603)?.outcome).toBe('approved');
+    // the picker is gone once the question is answered
+    expect(gateway.componentsOf(matrix.messageId)).toBeUndefined();
+  });
+
+  it('falls back to the configured default for a plain ✅', async () => {
+    await runCycle(pipeline(heuristicAgent()));
+    const inception = gateway.posted.find((p) => p.embed.title.startsWith('Inception'))!;
+    await gateway.react(inception.messageId, APPROVE_EMOJI);
+
+    expect(arrPosts[0]?.body).toMatchObject({ tmdbId: 27205, qualityProfileId: 4 });
+    expect(store.suggestionByMessage(inception.messageId)?.qualityProfileName).toBe('HD-1080p');
+  });
+});
+
 describe('a ❌ rejection', () => {
   it('records the no and never suggests that title again', async () => {
     await runCycle(pipeline(heuristicAgent()));

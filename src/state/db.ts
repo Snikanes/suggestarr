@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
+import type { QualityProfile } from '../arr/adder.js';
 import { migrate, type MigrationLogger } from './migrator.js';
 import type { Candidate } from '../tmdb/types.js';
 import type { JudgeResult, Verdict } from '../agent/types.js';
@@ -54,7 +55,6 @@ export interface Mismatch {
   type: 'dropped-but-wanted' | 'kept-but-rejected';
 }
 
-
 /** Lifecycle of one posted Discord suggestion. */
 export type SuggestionState = 'pending' | 'approved' | 'rejected' | 'failed' | 'expired';
 
@@ -70,6 +70,9 @@ export interface SuggestionRow {
   state: SuggestionState;
   resolvedAt: string | null;
   error: string | null;
+  /** the profile it was actually added at; null until approved */
+  qualityProfileId: number | null;
+  qualityProfileName: string | null;
 }
 
 export interface NewSuggestion {
@@ -93,6 +96,8 @@ interface RawSuggestion {
   state: SuggestionState;
   resolved_at: string | null;
   error: string | null;
+  quality_profile_id: number | null;
+  quality_profile_name: string | null;
 }
 
 interface RawDecision {
@@ -382,12 +387,30 @@ export class Store {
 
   /**
    * Close out a suggestion. `failed` keeps the error text so the Discord
-   * message can say why the *arr refused it.
+   * message can say why the *arr refused it; an approval keeps the
+   * quality profile it actually landed at, which may not be the default.
    */
-  markSuggestion(id: number, state: SuggestionState, error: string | null = null, now = new Date()): boolean {
+  markSuggestion(
+    id: number,
+    state: SuggestionState,
+    opts: { error?: string; qualityProfile?: QualityProfile } = {},
+    now = new Date(),
+  ): boolean {
     const res = this.db
-      .prepare(`UPDATE suggestions SET state = ?, resolved_at = ?, error = ? WHERE id = ?`)
-      .run(state, now.toISOString(), error, id);
+      .prepare(
+        `UPDATE suggestions
+            SET state = ?, resolved_at = ?, error = ?,
+                quality_profile_id = ?, quality_profile_name = ?
+          WHERE id = ?`,
+      )
+      .run(
+        state,
+        now.toISOString(),
+        opts.error ?? null,
+        opts.qualityProfile?.id ?? null,
+        opts.qualityProfile?.name ?? null,
+        id,
+      );
     return res.changes > 0;
   }
 
@@ -475,6 +498,8 @@ function toSuggestionRow(r: RawSuggestion): SuggestionRow {
     state: r.state,
     resolvedAt: r.resolved_at,
     error: r.error,
+    qualityProfileId: r.quality_profile_id,
+    qualityProfileName: r.quality_profile_name,
   };
 }
 

@@ -10,6 +10,7 @@ import { ArrApiError } from './arr/http.js';
 import { RadarrClient } from './arr/radarr.js';
 import type { Title } from './arr/types.js';
 import { runCycle, type CycleReport } from './cycle.js';
+import { buildCommands } from './discord/commands.js';
 import { DiscordJsGateway } from './discord/discordjs.js';
 import { SuggestionService } from './discord/service.js';
 import { checkHealth, formatHealth } from './health.js';
@@ -111,6 +112,29 @@ async function judge(): Promise<void> {
 }
 
 /**
+ * The Discord half of `cycle` and `bot`: gateway, service, and the slash
+ * commands.
+ *
+ * `/add`'s quality-profile choices are baked in at registration time, so
+ * they are read from Radarr here. A Radarr that is down at startup costs
+ * only the choice list — the command still registers, and the bot still
+ * runs.
+ */
+async function discordDeps(
+  store: Store,
+): Promise<{ gateway: DiscordJsGateway; service: SuggestionService; channelId: string }> {
+  const discordConfig = requireDiscord(config);
+  const adder = new ArrAdder(new RadarrClient(config.radarr), config.placement);
+  const profiles = await adder.qualityProfiles().catch((e: Error) => {
+    logger.warn({ err: e.message }, 'could not read Radarr quality profiles for /add');
+    return [];
+  });
+  const gateway = new DiscordJsGateway(discordConfig, buildCommands(profiles));
+  const service = new SuggestionService({ store, gateway, adder, logger });
+  return { gateway, service, channelId: discordConfig.channelId };
+}
+
+/**
  * One full cycle, posted to Discord, then exit — the manual counterpart
  * to the schedule, for a first run or an out-of-band top-up.
  *
@@ -119,15 +143,8 @@ async function judge(): Promise<void> {
  * the database until then; nothing is lost, but nothing is added either.
  */
 async function cycleOnce(): Promise<void> {
-  const discordConfig = requireDiscord(config);
   const store = await Store.open(config.dbPath, logger);
-  const gateway = new DiscordJsGateway(discordConfig);
-  const service = new SuggestionService({
-    store,
-    gateway,
-    adder: new ArrAdder(new RadarrClient(config.radarr), config.placement),
-    logger,
-  });
+  const { gateway, service } = await discordDeps(store);
 
   try {
     await gateway.start();
@@ -146,19 +163,12 @@ async function cycleOnce(): Promise<void> {
 
 /** The real thing: Discord bot up, one cycle now, then serve reactions. */
 async function bot(): Promise<void> {
-  const discordConfig = requireDiscord(config);
   const store = await Store.open(config.dbPath, logger);
-  const gateway = new DiscordJsGateway(discordConfig);
-  const service = new SuggestionService({
-    store,
-    gateway,
-    adder: new ArrAdder(new RadarrClient(config.radarr), config.placement),
-    logger,
-  });
+  const { gateway, service, channelId } = await discordDeps(store);
 
   service.register();
   await gateway.start();
-  logger.info({ channel: discordConfig.channelId }, 'discord gateway up');
+  logger.info({ channel: channelId }, 'discord gateway up');
 
   // Answers given while the bot was down are not replayed by Discord —
   // read them off the messages themselves before arming the schedule.

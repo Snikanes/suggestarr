@@ -1,4 +1,5 @@
 import * as baseline from './001-baseline.js';
+import * as qualityProfile from './002-quality-profile.js';
 import type { Migration } from './types.js';
 
 /** A migration and the name it is recorded under. */
@@ -15,4 +16,7 @@ export interface NamedMigration extends Migration {
  * nothing looks exactly like a database that is already up to date.
  * A static import list cannot drift from what shipped.
  */
-export const MIGRATIONS: NamedMigration[] = [{ name: '001-baseline', ...baseline }];
+export const MIGRATIONS: NamedMigration[] = [
+  { name: '001-baseline', ...baseline },
+  { name: '002-quality-profile', ...qualityProfile },
+];

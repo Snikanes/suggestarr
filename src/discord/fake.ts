@@ -2,7 +2,9 @@ import type { SuggestionEmbed } from './embeds.js';
 import type {
   CommandEvent,
   CommandReply,
+  ComponentEvent,
   DiscordGateway,
+  MessageComponents,
   PostedMessage,
   ReactionEvent,
   ReactionSnapshot,
@@ -14,9 +16,16 @@ import type {
  * handlers the real gateway would call.
  */
 export class FakeGateway implements DiscordGateway {
-  readonly posted: (PostedMessage & { embed: SuggestionEmbed; reactions: string[] })[] = [];
+  readonly posted: (PostedMessage & {
+    embed: SuggestionEmbed;
+    reactions: string[];
+    components?: MessageComponents;
+  })[] = [];
   readonly notices: string[] = [];
-  readonly edits: (PostedMessage & { embed: SuggestionEmbed })[] = [];
+  readonly edits: (PostedMessage & {
+    embed: SuggestionEmbed;
+    components?: MessageComponents;
+  })[] = [];
   started = false;
 
   /** messageId -> reactions already sitting on it */
@@ -25,6 +34,7 @@ export class FakeGateway implements DiscordGateway {
   private readonly deleted = new Set<string>();
 
   private reactionHandler?: (event: ReactionEvent) => Promise<void>;
+  private componentHandler?: (event: ComponentEvent) => Promise<CommandReply>;
   private commandHandler?: (event: CommandEvent) => Promise<CommandReply>;
   private nextId = 1;
 
@@ -38,16 +48,28 @@ export class FakeGateway implements DiscordGateway {
     this.started = false;
   }
 
-  async post(embed: SuggestionEmbed, reactions: string[]): Promise<PostedMessage> {
+  async post(
+    embed: SuggestionEmbed,
+    reactions: string[],
+    components?: MessageComponents,
+  ): Promise<PostedMessage> {
     const message = { channelId: this.channelId, messageId: `msg-${this.nextId++}` };
-    this.posted.push({ ...message, embed, reactions });
+    this.posted.push({ ...message, embed, reactions, ...(components ? { components } : {}) });
     return message;
   }
 
-  async edit(message: PostedMessage, embed: SuggestionEmbed): Promise<void> {
-    this.edits.push({ ...message, embed });
+  async edit(
+    message: PostedMessage,
+    embed: SuggestionEmbed,
+    components?: MessageComponents,
+  ): Promise<void> {
+    this.edits.push({ ...message, embed, ...(components ? { components } : {}) });
     const post = this.posted.find((p) => p.messageId === message.messageId);
-    if (post) post.embed = embed;
+    if (post) {
+      post.embed = embed;
+      delete post.components;
+      if (components) post.components = components;
+    }
   }
 
   async notice(text: string): Promise<void> {
@@ -56,6 +78,10 @@ export class FakeGateway implements DiscordGateway {
 
   onReaction(handler: (event: ReactionEvent) => Promise<void>): void {
     this.reactionHandler = handler;
+  }
+
+  onComponent(handler: (event: ComponentEvent) => Promise<CommandReply>): void {
+    this.componentHandler = handler;
   }
 
   onCommand(handler: (event: CommandEvent) => Promise<CommandReply>): void {
@@ -93,6 +119,24 @@ export class FakeGateway implements DiscordGateway {
     });
   }
 
+  /** Test driver: pretend a user picked from a message's select menu. */
+  async select(
+    messageId: string,
+    values: string[],
+    opts: { customId?: string; userIsBot?: boolean } = {},
+  ): Promise<CommandReply> {
+    if (!this.componentHandler) throw new Error('no component handler registered');
+    const menu = this.posted.find((p) => p.messageId === messageId)?.components;
+    return this.componentHandler({
+      customId: opts.customId ?? menu?.customId ?? 'unknown',
+      values,
+      messageId,
+      channelId: this.channelId,
+      userId: 'user-1',
+      userIsBot: opts.userIsBot ?? false,
+    });
+  }
+
   /** Test driver: pretend a user ran a slash command. */
   async command(
     name: string,
@@ -100,6 +144,11 @@ export class FakeGateway implements DiscordGateway {
   ): Promise<CommandReply> {
     if (!this.commandHandler) throw new Error('no command handler registered');
     return this.commandHandler({ name, options, userId: 'user-1' });
+  }
+
+  /** The components currently under a message, if any. */
+  componentsOf(messageId: string): MessageComponents | undefined {
+    return this.posted.find((p) => p.messageId === messageId)?.components;
   }
 
   /** The embed currently shown for a message (post, or latest edit). */

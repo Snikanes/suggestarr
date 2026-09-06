@@ -1,20 +1,57 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { SuggestionService } from '../../src/discord/service.js';
+import { PROFILE_MENU_ID, SuggestionService } from '../../src/discord/service.js';
 import { FakeGateway } from '../../src/discord/fake.js';
 import { APPROVE_EMOJI, COLORS, REJECT_EMOJI } from '../../src/discord/embeds.js';
+import { CHOICE_LIMIT } from '../../src/discord/commands.js';
 import { Store } from '../../src/state/db.js';
-import { TitleNotFoundError, type AddedTitle, type TitleAdder } from '../../src/arr/adder.js';
+import {
+  TitleNotFoundError,
+  type AddedTitle,
+  type AddOverrides,
+  type QualityProfile,
+  type TitleAdder,
+} from '../../src/arr/adder.js';
 import { candidatesFixture, judgeResultFixture } from '../fixtures/agent.js';
+
+const PROFILES: QualityProfile[] = [
+  { id: 4, name: 'HD-1080p' },
+  { id: 6, name: 'Ultra-HD' },
+];
 
 /** Records what would have been added; can be told to fail. */
 class StubAdder implements TitleAdder {
-  readonly added: { remoteId: number; title: string }[] = [];
+  readonly added: { remoteId: number; title: string; qualityProfileId: number }[] = [];
   failure: Error | null = null;
+  profileFailure: Error | null = null;
+  profiles: QualityProfile[] = PROFILES;
 
-  async add(remoteId: number, title: string): Promise<AddedTitle> {
+  async add(
+    remoteId: number,
+    title: string,
+    _year: number | null,
+    overrides: AddOverrides = {},
+  ): Promise<AddedTitle> {
     if (this.failure) throw this.failure;
-    this.added.push({ remoteId, title });
-    return { remoteId, localId: 42, title, rootFolderPath: '/movies', qualityProfileId: 4 };
+    const id = overrides.qualityProfileId ?? 4;
+    this.added.push({ remoteId, title, qualityProfileId: id });
+    return {
+      remoteId,
+      localId: 42,
+      title,
+      rootFolderPath: '/movies',
+      qualityProfileId: id,
+      qualityProfileName: this.profiles.find((p) => p.id === id)?.name ?? `profile ${id}`,
+    };
+  }
+
+  async qualityProfiles(): Promise<QualityProfile[]> {
+    if (this.profileFailure) throw this.profileFailure;
+    return this.profiles;
+  }
+
+  async defaultQualityProfile(): Promise<QualityProfile> {
+    if (this.profileFailure) throw this.profileFailure;
+    return this.profiles[0]!;
   }
 }
 
@@ -35,6 +72,24 @@ beforeEach(async () => {
 
 /** msg-1 = The Matrix (kept), msg-2 = Inception (kept); 999 was dropped. */
 const MATRIX_MSG = 'msg-1';
+
+/** A whole second posting run against its own store, gateway and adder. */
+async function postWith(
+  adder: StubAdder,
+  logger: Partial<{ info: (o: unknown) => void; error: (o: unknown) => void }> = {},
+): Promise<FakeGateway> {
+  const gateway = new FakeGateway();
+  const store = await Store.open(':memory:');
+  const service = new SuggestionService({
+    store,
+    gateway,
+    adder,
+    logger: { info: () => undefined, error: () => undefined, ...logger },
+  });
+  store.recordJudgement(judgeResultFixture, candidatesFixture);
+  await service.postVerdicts(judgeResultFixture, candidatesFixture);
+  return gateway;
+}
 
 describe('postVerdicts', () => {
   it('posts only what the agent kept, with both reaction affordances', () => {
@@ -66,7 +121,7 @@ describe('reactions', () => {
   it('✅ adds the title, records the outcome and rewrites the embed', async () => {
     await gateway.react(MATRIX_MSG, APPROVE_EMOJI);
 
-    expect(adder.added).toEqual([{ remoteId: 603, title: 'The Matrix' }]);
+    expect(adder.added).toEqual([{ remoteId: 603, title: 'The Matrix', qualityProfileId: 4 }]);
     expect(store.latestDecision(603)?.outcome).toBe('approved');
     expect(store.suggestionByMessage(MATRIX_MSG)?.state).toBe('approved');
 
@@ -122,14 +177,16 @@ describe('/add', () => {
     const reply = await gateway.command('add', { tmdb_id: 999 });
 
     expect(reply.text).toContain('despite the agent dropping it');
-    expect(adder.added).toEqual([{ remoteId: 999, title: 'Direct To Streaming 4' }]);
+    expect(adder.added).toEqual([
+      { remoteId: 999, title: 'Direct To Streaming 4', qualityProfileId: 4 },
+    ]);
     expect(store.latestDecision(999)?.outcome).toBe('force-added');
     expect(store.mismatches().map((m) => m.type)).toEqual(['dropped-but-wanted']);
   });
 
   it('approves any pending suggestion by its TMDB id', async () => {
     await gateway.command('add', { tmdb_id: 27205 });
-    expect(adder.added).toEqual([{ remoteId: 27205, title: 'Inception' }]);
+    expect(adder.added).toEqual([{ remoteId: 27205, title: 'Inception', qualityProfileId: 4 }]);
   });
 
   it('reports bad input and titles it has never judged', async () => {
@@ -229,7 +286,7 @@ describe('reconcilePending', () => {
     const result = await service.reconcilePending();
 
     expect(result).toEqual({ approved: 1, rejected: 0, unreadable: 0 });
-    expect(adder.added).toEqual([{ remoteId: 603, title: 'The Matrix' }]);
+    expect(adder.added).toEqual([{ remoteId: 603, title: 'The Matrix', qualityProfileId: 4 }]);
     expect(store.latestDecision(603)?.outcome).toBe('approved');
     expect(store.suggestionByMessage(MATRIX_MSG)?.state).toBe('approved');
   });
@@ -291,6 +348,135 @@ describe('reconcilePending', () => {
       rejected: 0,
       unreadable: 0,
     });
+  });
+});
+
+describe('the quality profile picker', () => {
+  it('offers every Radarr profile, default first and labelled', () => {
+    const menu = gateway.componentsOf(MATRIX_MSG)!;
+    expect(menu.customId).toBe(PROFILE_MENU_ID);
+    expect(menu.placeholder).toMatch(/quality profile/i);
+    expect(menu.options).toEqual([
+      { label: 'HD-1080p', value: '4', description: 'default' },
+      { label: 'Ultra-HD', value: '6' },
+    ]);
+  });
+
+  it('puts the configured default first even when Radarr lists it later', async () => {
+    const picky = new StubAdder();
+    picky.defaultQualityProfile = async () => ({ id: 6, name: 'Ultra-HD' });
+    const fresh = await postWith(picky);
+
+    expect(fresh.componentsOf(MATRIX_MSG)?.options).toEqual([
+      { label: 'Ultra-HD', value: '6', description: 'default' },
+      { label: 'HD-1080p', value: '4' },
+    ]);
+  });
+
+  it('adds the picked profile and names it in the embed', async () => {
+    const reply = await gateway.select(MATRIX_MSG, ['6']);
+
+    expect(reply.ephemeral).toBe(true);
+    expect(reply.text).toContain('Ultra-HD');
+    expect(adder.added).toEqual([{ remoteId: 603, title: 'The Matrix', qualityProfileId: 6 }]);
+    expect(store.latestDecision(603)?.outcome).toBe('approved');
+
+    const suggestion = store.suggestionByMessage(MATRIX_MSG)!;
+    expect(suggestion.state).toBe('approved');
+    expect(suggestion.qualityProfileId).toBe(6);
+    expect(suggestion.qualityProfileName).toBe('Ultra-HD');
+    expect(gateway.embedOf(MATRIX_MSG)?.fields.at(-1)?.value).toContain('**Ultra-HD**');
+  });
+
+  it('is gone from the message once the suggestion is resolved', async () => {
+    await gateway.select(MATRIX_MSG, ['6']);
+    expect(gateway.componentsOf(MATRIX_MSG)).toBeUndefined();
+    expect(gateway.edits.at(-1)?.components).toBeUndefined();
+  });
+
+  it('ignores bots, foreign menus, unknown messages and resolved suggestions', async () => {
+    expect((await gateway.select(MATRIX_MSG, ['6'], { userIsBot: true })).text).toBe('Ignored.');
+    expect(
+      (await gateway.select(MATRIX_MSG, ['6'], { customId: 'someone-elses-menu' })).text,
+    ).toMatch(/Unknown menu/);
+    expect(
+      (await gateway.select('msg-unknown', ['6'], { customId: PROFILE_MENU_ID })).text,
+    ).toMatch(/no longer on record/);
+    expect(adder.added).toEqual([]);
+
+    await gateway.react(MATRIX_MSG, REJECT_EMOJI);
+    expect((await gateway.select(MATRIX_MSG, ['6'], { customId: PROFILE_MENU_ID })).text).toMatch(
+      /already rejected/,
+    );
+    expect(adder.added).toEqual([]);
+  });
+
+  it('refuses a profile Radarr no longer offers', async () => {
+    const reply = await gateway.select(MATRIX_MSG, ['999']);
+    expect(reply.text).toMatch(/no longer offers/);
+    expect(reply.text).toContain('HD-1080p, Ultra-HD');
+    expect(adder.added).toEqual([]);
+    expect(store.suggestionByMessage(MATRIX_MSG)?.state).toBe('pending');
+  });
+
+  it('still posts, without a picker, when Radarr will not name its profiles', async () => {
+    const blind = new StubAdder();
+    blind.profileFailure = new Error('Radarr unreachable');
+    const logged: unknown[] = [];
+    const fresh = await postWith(blind, { error: (o: unknown) => void logged.push(o) });
+
+    expect(fresh.posted).toHaveLength(2);
+    expect(fresh.posted[0]?.components).toBeUndefined();
+    expect(fresh.posted[0]?.reactions).toEqual([APPROVE_EMOJI, REJECT_EMOJI]);
+    expect(logged).toHaveLength(1);
+  });
+
+  it('shows only what Discord will accept when there are too many profiles', async () => {
+    const many = new StubAdder();
+    many.profiles = Array.from({ length: CHOICE_LIMIT + 3 }, (_, i) => ({
+      id: i + 1,
+      name: `profile-${i + 1}`,
+    }));
+    const logged: unknown[] = [];
+    const fresh = await postWith(many, { info: (o: unknown) => void logged.push(o) });
+
+    expect(fresh.componentsOf(MATRIX_MSG)?.options).toHaveLength(CHOICE_LIMIT);
+    expect(logged).toHaveLength(1);
+  });
+});
+
+describe('/add quality_profile', () => {
+  it('adds at the named profile, case-insensitively', async () => {
+    const reply = await gateway.command('add', { tmdb_id: 603, quality_profile: 'ultra-hd' });
+
+    expect(reply.text).toContain('Ultra-HD');
+    expect(adder.added).toEqual([{ remoteId: 603, title: 'The Matrix', qualityProfileId: 6 }]);
+  });
+
+  it('force-adds a dropped title at the named profile', async () => {
+    const reply = await gateway.command('add', { tmdb_id: 999, quality_profile: 'Ultra-HD' });
+
+    expect(reply.text).toContain('at **Ultra-HD**');
+    expect(adder.added).toEqual([
+      { remoteId: 999, title: 'Direct To Streaming 4', qualityProfileId: 6 },
+    ]);
+  });
+
+  it('names the alternatives when the profile does not exist', async () => {
+    const reply = await gateway.command('add', { tmdb_id: 603, quality_profile: 'Remux-2160p' });
+
+    expect(reply.text).toContain('no quality profile called');
+    expect(reply.text).toContain('HD-1080p, Ultra-HD');
+    expect(adder.added).toEqual([]);
+    expect(store.suggestionByMessage(MATRIX_MSG)?.state).toBe('pending');
+  });
+
+  it('says so when Radarr cannot be asked at all', async () => {
+    adder.profileFailure = new Error('Radarr unreachable');
+    const reply = await gateway.command('add', { tmdb_id: 603, quality_profile: 'Ultra-HD' });
+
+    expect(reply.text).toMatch(/Could not read Radarr's quality profiles: Radarr unreachable/);
+    expect(adder.added).toEqual([]);
   });
 });
 

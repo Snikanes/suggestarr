@@ -34,6 +34,13 @@ export const COLORS = {
 export const APPROVE_EMOJI = '✅';
 export const REJECT_EMOJI = '❌';
 
+/**
+ * The field explaining how to answer. Named once because it is written
+ * in `buildSuggestionEmbed` and stripped again in `buildResolvedEmbed` —
+ * the two must not drift apart.
+ */
+export const ANSWER_FIELD_NAME = 'How to answer';
+
 export function tmdbUrl(remoteId: number): string {
   return `https://www.themoviedb.org/movie/${remoteId}`;
 }
@@ -54,8 +61,11 @@ export function buildSuggestionEmbed(
       { name: 'TMDB', value: formatRating(candidate), inline: true },
       { name: 'Source', value: candidate.origin, inline: true },
       {
-        name: 'React to decide',
-        value: `${APPROVE_EMOJI} add to Radarr · ${REJECT_EMOJI} never suggest again`,
+        name: ANSWER_FIELD_NAME,
+        value:
+          `${APPROVE_EMOJI} add at the default quality profile · ` +
+          `${REJECT_EMOJI} never suggest again · ` +
+          'or pick a quality profile from the menu below',
         inline: false,
       },
     ],
@@ -107,7 +117,7 @@ export function buildResolvedEmbed(
     ...base,
     color: COLORS[outcome],
     fields: [
-      ...base.fields.filter((f) => f.name !== 'React to decide'),
+      ...base.fields.filter((f) => f.name !== ANSWER_FIELD_NAME),
       { name: headline, value: detail, inline: false },
     ],
   };

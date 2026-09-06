@@ -1,8 +1,9 @@
 import type { Logger } from 'pino';
-import type { TitleAdder } from '../arr/adder.js';
+import type { QualityProfile, TitleAdder } from '../arr/adder.js';
 import type { Candidate } from '../tmdb/types.js';
 import type { JudgeResult } from '../agent/types.js';
 import type { DecisionRow, Outcome, Store, SuggestionRow } from '../state/db.js';
+import { CHOICE_LIMIT } from './commands.js';
 import {
   APPROVE_EMOJI,
   REJECT_EMOJI,
@@ -14,10 +15,20 @@ import {
 import type {
   CommandEvent,
   CommandReply,
+  ComponentEvent,
   DiscordGateway,
+  MessageComponents,
   PostedMessage,
   ReactionEvent,
 } from './gateway.js';
+
+/**
+ * The quality-profile picker under every suggestion. One constant id is
+ * enough: the suggestion is identified by the message the menu sits on,
+ * exactly as it is for reactions.
+ */
+export const PROFILE_MENU_ID = 'suggestarr:approve-profile';
+const PROFILE_MENU_PLACEHOLDER = 'Approve with a quality profile…';
 
 export interface SuggestionServiceDeps {
   store: Store;
@@ -49,6 +60,7 @@ export class SuggestionService {
   /** Attach to the gateway. Call once, before `gateway.start()`. */
   register(): void {
     this.gateway.onReaction((e) => this.handleReaction(e));
+    this.gateway.onComponent((e) => this.handleComponent(e));
     this.gateway.onCommand((e) => this.handleCommand(e));
   }
 
@@ -63,6 +75,7 @@ export class SuggestionService {
     now = new Date(),
   ): Promise<number> {
     const byRemoteId = new Map(candidates.map((c) => [c.remoteId, c]));
+    const menu = await this.profileMenu();
     let posted = 0;
 
     for (const verdict of result.verdicts) {
@@ -75,7 +88,7 @@ export class SuggestionService {
         model: result.model,
         promptVersion: result.promptVersion,
       });
-      const message = await this.gateway.post(embed, [APPROVE_EMOJI, REJECT_EMOJI]);
+      const message = await this.gateway.post(embed, [APPROVE_EMOJI, REJECT_EMOJI], menu);
       this.store.recordSuggestion(
         {
           decisionId: decision.id,
@@ -90,6 +103,50 @@ export class SuggestionService {
       posted += 1;
     }
     return posted;
+  }
+
+  /**
+   * The quality-profile dropdown, or nothing when Radarr will not say
+   * what its profiles are.
+   *
+   * A missing picker is not a failed cycle: the ✅/❌ reactions still
+   * answer the suggestion, at the configured default profile. Losing the
+   * whole post over a dropdown would be the worse trade.
+   */
+  private async profileMenu(): Promise<MessageComponents | undefined> {
+    let profiles: QualityProfile[];
+    let fallback: QualityProfile;
+    try {
+      [profiles, fallback] = await Promise.all([
+        this.adder.qualityProfiles(),
+        this.adder.defaultQualityProfile(),
+      ]);
+    } catch (e) {
+      this.logger.error(
+        { err: (e as Error).message },
+        'could not read Radarr quality profiles; posting without the picker',
+      );
+      return undefined;
+    }
+
+    // The default first, so the 25-option cap can never cut it off.
+    const ordered = [fallback, ...profiles.filter((p) => p.id !== fallback.id)];
+    if (ordered.length > CHOICE_LIMIT) {
+      this.logger.info(
+        { profiles: ordered.length, shown: CHOICE_LIMIT },
+        'more quality profiles than Discord will show in one menu',
+      );
+    }
+
+    return {
+      customId: PROFILE_MENU_ID,
+      placeholder: PROFILE_MENU_PLACEHOLDER,
+      options: ordered.slice(0, CHOICE_LIMIT).map((p) => ({
+        label: p.name,
+        value: String(p.id),
+        ...(p.id === fallback.id ? { description: 'default' } : {}),
+      })),
+    };
   }
 
   /**
@@ -187,6 +244,38 @@ export class SuggestionService {
     }
   }
 
+  /**
+   * Someone picked a quality profile from the dropdown. Unlike a
+   * reaction this must answer the interaction, so every path returns
+   * something to say rather than falling silent.
+   */
+  async handleComponent(event: ComponentEvent): Promise<CommandReply> {
+    if (event.userIsBot) return ephemeral('Ignored.');
+    if (event.customId !== PROFILE_MENU_ID) {
+      return ephemeral(`Unknown menu \`${event.customId}\`.`);
+    }
+
+    const suggestion = this.store.suggestionByMessage(event.messageId);
+    if (!suggestion) return ephemeral('That suggestion is no longer on record.');
+    if (suggestion.state !== 'pending') {
+      this.logger.info(
+        { messageId: event.messageId, state: suggestion.state },
+        'profile picked on an already-resolved suggestion, ignored',
+      );
+      return ephemeral(`**${suggestion.title}** is already ${suggestion.state} — nothing to do.`);
+    }
+
+    const picked = event.values[0];
+    const profiles = await this.adder.qualityProfiles();
+    const profile = profiles.find((p) => String(p.id) === picked);
+    if (!profile) {
+      return ephemeral(
+        `Radarr no longer offers that quality profile. Available: ${profileNames(profiles)}.`,
+      );
+    }
+    return ephemeral(await this.approve(suggestion, profile));
+  }
+
   /** `/add`, `/skip`, `/decisions`, `/status`. */
   async handleCommand(event: CommandEvent): Promise<CommandReply> {
     switch (event.name) {
@@ -207,18 +296,33 @@ export class SuggestionService {
   // Approve / reject
   // -------------------------------------------------------------------------
 
-  private async approve(suggestion: SuggestionRow): Promise<string> {
+  private async approve(suggestion: SuggestionRow, profile?: QualityProfile): Promise<string> {
     const decision = this.store.latestDecision(suggestion.remoteId);
     const outcome = decision?.verdict === 'drop' ? 'force-added' : 'approved';
 
     try {
-      const added = await this.adder.add(suggestion.remoteId, suggestion.title, suggestion.year);
-      this.store.markSuggestion(suggestion.id, 'approved');
+      const added = await this.adder.add(
+        suggestion.remoteId,
+        suggestion.title,
+        suggestion.year,
+        profile ? { qualityProfileId: profile.id } : {},
+      );
+      // What Radarr actually used, not what was asked for.
+      this.store.markSuggestion(suggestion.id, 'approved', {
+        qualityProfile: { id: added.qualityProfileId, name: added.qualityProfileName },
+      });
       this.store.setOutcome(suggestion.remoteId, outcome);
-      const detail = `Monitored in Radarr at \`${added.rootFolderPath}\` — the download starts on its own.`;
+      const detail =
+        `Monitored in Radarr at \`${added.rootFolderPath}\` ` +
+        `at **${added.qualityProfileName}** — the download starts on its own.`;
       await this.editResolved(suggestion, 'approved', detail);
       this.logger.info(
-        { remoteId: suggestion.remoteId, localId: added.localId, outcome },
+        {
+          remoteId: suggestion.remoteId,
+          localId: added.localId,
+          outcome,
+          qualityProfile: added.qualityProfileName,
+        },
         'suggestion approved and added',
       );
       return detail;
@@ -226,7 +330,7 @@ export class SuggestionService {
       const message = (e as Error).message;
       // The *arr refused it: keep the decision pending so a retry is
       // still possible, but say plainly what went wrong.
-      this.store.markSuggestion(suggestion.id, 'failed', message);
+      this.store.markSuggestion(suggestion.id, 'failed', { error: message });
       await this.editResolved(suggestion, 'failed', message);
       this.logger.error(
         { remoteId: suggestion.remoteId, err: message },
@@ -270,8 +374,16 @@ export class SuggestionService {
     const remoteId = numberOption(event.options.tmdb_id);
     if (remoteId === undefined) return ephemeral(TMDB_ID_HELP);
 
+    const wanted = event.options.quality_profile;
+    let profile: QualityProfile | undefined;
+    if (wanted !== undefined) {
+      const picked = await this.pickProfile(String(wanted));
+      if (typeof picked === 'string') return ephemeral(picked);
+      profile = picked;
+    }
+
     const pending = this.store.pendingSuggestionFor(remoteId);
-    if (pending) return ephemeral(await this.approve(pending));
+    if (pending) return ephemeral(await this.approve(pending, profile));
 
     const decision = this.store.latestDecision(remoteId);
     if (!decision) {
@@ -282,7 +394,26 @@ export class SuggestionService {
     if (isDecided(decision.outcome)) {
       return ephemeral(`\`${decision.title}\` is already ${decision.outcome} — nothing to do.`);
     }
-    return ephemeral(await this.forceAdd(decision));
+    return ephemeral(await this.forceAdd(decision, profile));
+  }
+
+  /**
+   * Resolve a `/add quality_profile:` value against Radarr, matched the
+   * same case-insensitive way `RADARR_QUALITY_PROFILE` is. Returns the
+   * message to show the user when it cannot be resolved.
+   */
+  private async pickProfile(name: string): Promise<QualityProfile | string> {
+    let profiles: QualityProfile[];
+    try {
+      profiles = await this.adder.qualityProfiles();
+    } catch (e) {
+      return `Could not read Radarr's quality profiles: ${(e as Error).message}`;
+    }
+    const profile = profiles.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    if (!profile) {
+      return `Radarr has no quality profile called \`${name}\`. Available: ${profileNames(profiles)}.`;
+    }
+    return profile;
   }
 
   /**
@@ -290,15 +421,23 @@ export class SuggestionService {
    * decision log exists for, so it is recorded as `force-added` rather
    * than as an ordinary approval.
    */
-  private async forceAdd(decision: DecisionRow): Promise<string> {
+  private async forceAdd(decision: DecisionRow, profile?: QualityProfile): Promise<string> {
     try {
-      const added = await this.adder.add(decision.remoteId, decision.title, decision.year);
+      const added = await this.adder.add(
+        decision.remoteId,
+        decision.title,
+        decision.year,
+        profile ? { qualityProfileId: profile.id } : {},
+      );
       this.store.setOutcome(decision.remoteId, 'force-added');
       this.logger.info(
-        { remoteId: decision.remoteId, localId: added.localId },
+        { remoteId: decision.remoteId, localId: added.localId, qualityProfile: added.qualityProfileName },
         'dropped title force-added by the user',
       );
-      return `Added **${decision.title}** despite the agent dropping it. Logged as a prompt mismatch.`;
+      return (
+        `Added **${decision.title}** at **${added.qualityProfileName}** despite the agent ` +
+        'dropping it. Logged as a prompt mismatch.'
+      );
     } catch (e) {
       const message = (e as Error).message;
       this.logger.error(
@@ -399,6 +538,10 @@ function numberOption(value: string | number | undefined): number | undefined {
   if (value === undefined) return undefined;
   const n = typeof value === 'number' ? value : Number(value);
   return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function profileNames(profiles: QualityProfile[]): string {
+  return profiles.map((p) => p.name).join(', ');
 }
 
 function ephemeral(text: string): CommandReply {
