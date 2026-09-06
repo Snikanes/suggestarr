@@ -1,0 +1,144 @@
+version: "3"
+services:
+  sonarr:
+    image: linuxserver/sonarr:latest
+    container_name: sonarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Oslo
+      - UMASK_SET=022
+    volumes:
+      - /usr/plex/bin/sonarr:/config
+      - /mnt/sda/downloads:/downloads
+    restart: unless-stopped
+  radarr:
+    image: linuxserver/radarr:latest
+    container_name: radarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Oslo
+      - UMASK_SET=022
+    volumes:
+      - /usr/plex/bin/radarr:/config
+      - /mnt/sda/downloads/movies:/movies
+      - /mnt/sda/downloads:/downloads
+    restart: unless-stopped
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Oslo
+    volumes:
+      - /usr/plex/bin/prowlarr:/config
+    restart: unless-stopped
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT=8080
+      - TORRENTING_PORT=6881
+    volumes:
+      - /usr/qbittorrent/appdata:/config
+      - /mnt/sda/downloads:/downloads
+    restart: unless-stopped
+  plex:
+    image: linuxserver/plex:latest
+    container_name: plex
+    network_mode: host
+    ports:
+      - 32400:32400
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - VERSION=docker
+      - UMASK_SET=022 #optional
+    volumes:
+      - /usr/plex/bin/plex:/config
+      - /mnt/sda/downloads/tv:/tv
+      - /mnt/sda/downloads/movies:/movies
+      - /mnt/sda/downloads/transcode:/transcode
+    restart: unless-stopped
+  spectarr:
+    image: ghcr.io/larsellefsen/spectarr:latest
+    container_name: spectarr
+    restart: unless-stopped
+    user: 1000:1000
+    network_mode: "service:gluetun"
+    volumes:
+      - /usr/plex/bin/spectarr:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Oslo
+  dispatcharr:
+    image: ghcr.io/dispatcharr/dispatcharr:latest
+    container_name: dispatcharr
+    network_mode: "service:gluetun"
+    volumes:
+      - /usr/plex/bin/dispatcharr:/data
+    environment:
+      - DISPATCHARR_ENV=aio
+      - REDIS_HOST=localhost
+      - CELERY_BROKER_URL=redis://localhost:6379/0
+      - DISPATCHARR_LOG_LEVEL=info
+    restart: unless-stopped
+  suggestarr:
+    build: .
+    image: suggestarr:latest
+    container_name: suggestarr
+    # Deliberately NOT behind gluetun: suggestarr torrents nothing. It needs
+    # Discord, TMDB and the LLM provider directly, and reaches Radarr/Sonarr
+    # over the ports gluetun publishes on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Oslo
+      - UMASK_SET=022
+      - RADARR_URL=http://host.docker.internal:7878
+      - SUGGESTARR_DB_PATH=/config/suggestarr.db
+    env_file:
+      - .env
+    volumes:
+      - /usr/plex/bin/suggestarr:/config
+    # Let an in-flight cycle finish (one LLM call + a few *arr writes)
+    stop_grace_period: 60s
+    restart: unless-stopped
+    depends_on:
+      - radarr
+  gluetun:
+    image: qmcgaw/gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - /usr/plex/bin/gluetun:/gluetun
+    ports:
+      - 8080:8080 #qbittorrent UI
+      - 8686:8686 # Lidarr
+      - 6881:6881 #qbittorrent
+      - 6881:6881/udp #qbittorrent
+      - 9696:9696 #prowlarr
+      - 8989:8989 #sonarr
+      - 7878:7878 #radarr
+      - 6969:6969 #spectarr
+      - 9191:9191 #dispatcharr
+    environment:
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_PORT_FORWARDING=on
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=AC57QboFPDa4AEtDZNLDmFmULGEpBVUj/Ze1DyVZPXM=
+      - WIREGUARD_ADDRESSES=10.2.0.2/32

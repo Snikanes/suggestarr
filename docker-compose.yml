@@ -1,0 +1,24 @@
+services:
+  suggestarr:
+    build: .
+    image: suggestarr:latest
+    container_name: suggestarr
+    # Deliberately NOT behind gluetun: suggestarr torrents nothing. It needs
+    # Discord, TMDB and the LLM provider directly, and reaches Radarr over
+    # the port gluetun publishes on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Oslo
+      - UMASK_SET=022
+      - RADARR_URL=http://host.docker.internal:7878
+      - SUGGESTARR_DB_PATH=/config/suggestarr.db
+    env_file:
+      - .env
+    volumes:
+      - /usr/plex/bin/suggestarr:/config
+    # Let an in-flight cycle finish (one LLM call + a few Radarr writes)
+    stop_grace_period: 60s
+    restart: unless-stopped

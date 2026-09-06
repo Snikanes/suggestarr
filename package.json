@@ -1,0 +1,46 @@
+{
+  "name": "suggestarr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "library": "tsx src/main.ts library",
+    "judge": "tsx src/main.ts judge",
+    "cycle": "tsx src/main.ts cycle",
+    "bot": "tsx src/main.ts bot",
+    "health": "tsx src/main.ts health",
+    "report:decisions": "tsx src/main.ts report:decisions",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "report:html": "tsx src/main.ts report:html"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "croner": "^10.0.1",
+    "discord.js": "^14.27.0",
+    "pino": "^9.5.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.9.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "msw": "^2.7.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true,
+    "fsevents@2.3.3": true,
+    "msw@2.15.0": true,
+    "better-sqlite3@13.0.3": true
+  }
+}

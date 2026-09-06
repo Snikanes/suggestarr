@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Every integration is mocked (msw + in-memory Discord + the offline
+      # judge), so the whole pipeline runs here with no keys and no network.
+      - name: Test with coverage
+        run: npm run test:coverage
+        env:
+          LLM_PROVIDER: mock
+
+  # The image is how this actually ships, so a broken Dockerfile or a
+  # native better-sqlite3 build should fail here, not on the host.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: suggestarr:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The entrypoint runs and the CLI answers
+        run: |
+          docker run --rm --entrypoint node suggestarr:ci dist/main.js nonsense 2>&1 \
+            | grep -q 'Usage: suggestarr'
