@@ -3,6 +3,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   REST,
   Routes,
@@ -73,8 +74,8 @@ export class DiscordJsGateway implements DiscordGateway {
       if (interaction.isStringSelectMenu()) {
         if (!this.componentHandler) return;
         // Radarr's lookup + add can outlast Discord's three-second
-        // acknowledgement window, which the slash commands never risk.
-        await interaction.deferReply({ ephemeral: true });
+        // acknowledgement window, so acknowledge before doing the work.
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const reply = await this.componentHandler({
           customId: interaction.customId,
           values: interaction.values,
@@ -91,12 +92,18 @@ export class DiscordJsGateway implements DiscordGateway {
       for (const option of interaction.options.data) {
         options[option.name] = option.value as string | number | undefined;
       }
+      // `/add` reaches Radarr (lookup + add, plus the one-off root folder
+      // and quality profile reads), which routinely outlasts Discord's
+      // three-second window on the first call after an idle spell. Every
+      // command reply is ephemeral, so the visibility is known up front
+      // and the deferral costs nothing.
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const reply = await this.commandHandler({
         name: interaction.commandName,
         options,
         userId: interaction.user.id,
       });
-      await interaction.reply({ content: reply.text, ephemeral: reply.ephemeral });
+      await interaction.editReply({ content: reply.text });
     });
 
     await this.registerCommands();
